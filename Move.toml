@@ -1,0 +1,10 @@
+[package]
+name = "gateway"
+version = "1.0.0"
+upgrade_policy = "compatible"  # Enables upgrades with compatibility checks
+
+[addresses]
+gateway = "0x432cc31ab1d0fb9660475b380dd67c9d98fd966f639b98e0d8614db9fec632eb"
+
+[dependencies]
+AptosTokenObjects = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-token-objects/", rev = "aptos-cli-v2.0.2" }
