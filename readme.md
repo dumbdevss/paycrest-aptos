@@ -79,10 +79,6 @@ Run unit tests with:
 aptos move test
 ```
 
-## License
-
-[Specify your license here]
-
 ## Contact
 
-For questions or support, please reach out to [Your Contact Information]
+For questions or support, please reach out to taiwotriumphant@gmail.com
