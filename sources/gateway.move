@@ -1548,8 +1548,12 @@ module gateway::gateway {
         let message_hash = string::utf8(b"");
         let sender_fee_address = @0x03;
         let sender_fee = 3;
+        let aggregator_addr = @0x04;
+        let treasury_addr = @0x05;
 
         setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), treasury_addr);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_addr);
 
         create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
 
@@ -1559,64 +1563,333 @@ module gateway::gateway {
         assert!(event::counter(&gateway.order_created_events) == 0, 1);
     }
 
-    // #[test(account = @gateway, test_user = @0x2)]
-    // public fun test_create_order_success(
-    //     account: &signer,
-    //     test_user: &signer
-    // ) acquires GatewaySettings {
-    //     let account_address = signer::address_of(account);
-    //     let test_address = signer::address_of(test_user);
-    //     account::create_account_for_test(account_address);
-    //     account::create_account_for_test(test_address);
-    //
-    //     // Set up timestamp for testing
-    //     let aptos_framework = account::create_account_for_test(@aptos_framework);
-    //     timestamp::set_time_has_started_for_testing(&aptos_framework);
-    //
-    //     // Initialize the module
-    //     init_module(account);
-    //
-    //     let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
-    //
-    //     // Create USDC metadata object
-    //     let usdc_metadata_ref = object::create_named_object(test_user, b"USDC");
-    //     primary_fungible_store::create_primary_store_enabled_fungible_asset(
-    //         &usdc_metadata_ref,
-    //         option::none(), // No maximum supply
-    //         string::utf8(b"USD Coin"), // name
-    //         string::utf8(b"USDC"), // symbol
-    //         8, // decimals for USDC
-    //         string::utf8(b"[invalid url, do not cite]"), // icon_uri
-    //         string::utf8(b"[invalid url, do not cite]") // project_uri
-    //     );
-    //     let usdc_address = object::address_from_constructor_ref(&usdc_metadata_ref);
-    //
-    //     setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
-    //
-    //     let token_metadata = object::address_to_object<fungible_asset::Metadata>(usdc_address);
-    //
-    //     let before_call_amount_for_caller = primary_fungible_store::balance(test_address, token_metadata);
-    //     let before_call_amount_for_resource_addr = primary_fungible_store::balance(expected_resource_account_address, token_metadata);
-    //
-    //     let amount = 1000;
-    //     let rate = 1560;
-    //     let sender_fee_address = @0x03;
-    //     let sender_fee = 3;
-    //     let message_hash = string::utf8(b"order created");
-    //
-    //     create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
-    //
-    //     let after_call_amount_for_caller = primary_fungible_store::balance(test_address, token_metadata);
-    //     let after_call_amount_for_resource_addr = primary_fungible_store::balance(expected_resource_account_address, token_metadata);
-    //
-    //     print(&amount);
-    //
-    //     let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
-    //     assert!(gateway.paused == true, 0);
-    //
-    //     assert!(before_call_amount_for_caller > after_call_amount_for_caller, 1);
-    //     assert!(before_call_amount_for_resource_addr < after_call_amount_for_resource_addr, 1);
-    //     assert!(vector::length(&gateway.order_store) == 1, 1);
-    //     assert!(event::counter(&gateway.order_created_events) == 1, 1);
-    // }
+    #[test(account = @gateway, test_user = @0x2)]
+    #[expected_failure(abort_code = E_ZERO_ADDRESS)]
+    public fun test_create_order_invalid_aggregator_address(
+        account: &signer,
+        test_user: &signer
+    ) acquires GatewaySettings {
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        let usdc_address = @0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b;
+        let amount = 1000;
+        let rate = 1560;
+        let message_hash = string::utf8(b"order created");
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let aggregator_addr = @0x0;
+        let treasury_addr = @0x05;
+
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), treasury_addr);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_addr);
+
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        assert!(vector::length(&gateway.supported_tokens) == 1, 1);
+        assert!(vector::length(&gateway.order_store) == 0, 1);
+        assert!(event::counter(&gateway.order_created_events) == 0, 1);
+    }
+
+    #[test(account = @gateway, test_user = @0x2)]
+    #[expected_failure(abort_code = E_ZERO_ADDRESS)]
+    public fun test_create_order_invalid_treasury_address(
+        account: &signer,
+        test_user: &signer
+    ) acquires GatewaySettings {
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        let usdc_address = @0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b;
+        let amount = 1000;
+        let rate = 1560;
+        let message_hash = string::utf8(b"");
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let aggregator_addr = @0x04;
+        let treasury_addr = @0x0;
+
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), treasury_addr);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_addr);
+
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        assert!(vector::length(&gateway.supported_tokens) == 1, 1);
+        assert!(vector::length(&gateway.order_store) == 0, 1);
+        assert!(event::counter(&gateway.order_created_events) == 0, 1);
+    }
+
+
+    #[test(account = @gateway, test_user = @0x2)]
+    #[expected_failure(abort_code = E_AMOUNT_ZERO)]
+    public fun test_create_order_invalid_amount(
+        account: &signer,
+        test_user: &signer
+    ) acquires GatewaySettings {
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        let usdc_address = @0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b;
+        let amount = 0;
+        let rate = 1560;
+        let message_hash = string::utf8(b"order created");
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let aggregator_addr = @0x04;
+        let treasury_addr = @0x05;
+
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), treasury_addr);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_addr);
+
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        assert!(vector::length(&gateway.supported_tokens) == 1, 1);
+        assert!(vector::length(&gateway.order_store) == 0, 1);
+        assert!(event::counter(&gateway.order_created_events) == 0, 1);
+    }
+
+    #[test(account = @gateway, test_user = @0x2)]
+    #[expected_failure(abort_code = E_ZERO_ADDRESS)]
+    public fun test_create_order_invalid_refund_address(
+        account: &signer,
+        test_user: &signer
+    ) acquires GatewaySettings {
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        let usdc_address = @0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b;
+        let amount = 1000;
+        let rate = 1560;
+        let message_hash = string::utf8(b"order created");
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let aggregator_addr = @0x04;
+        let treasury_addr = @0x0;
+
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), treasury_addr);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_addr);
+
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, @0x0, message_hash);
+
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        assert!(vector::length(&gateway.supported_tokens) == 1, 1);
+        assert!(vector::length(&gateway.order_store) == 0, 1);
+        assert!(event::counter(&gateway.order_created_events) == 0, 1);
+    }
+
+    #[test(account = @gateway, test_user = @0x2)]
+    #[expected_failure(abort_code = E_PAUSED)]
+    public fun test_create_order_paused(
+        account: &signer,
+        test_user: &signer
+    ) acquires GatewaySettings {
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+        pause(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        let usdc_address = @0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b;
+        let amount = 1000;
+        let rate = 1560;
+        let message_hash = string::utf8(b"order created");
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let aggregator_addr = @0x04;
+        let treasury_addr = @0x05;
+
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), treasury_addr);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_addr);
+
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, @0x0, message_hash);
+
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        assert!(vector::length(&gateway.supported_tokens) == 1, 1);
+        assert!(vector::length(&gateway.order_store) == 0, 1);
+        assert!(event::counter(&gateway.order_created_events) == 0, 1);
+    }
+
+
+    #[test(account = @gateway, test_user = @0x2)]
+    #[expected_failure(abort_code = E_PAUSED)]
+    public fun test_create_order_unsupported_token(
+        account: &signer,
+        test_user: &signer
+    ) acquires GatewaySettings {
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+        pause(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        let usdc_address = @0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b;
+        let amount = 1000;
+        let rate = 1560;
+        let message_hash = string::utf8(b"order created");
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let aggregator_addr = @0x04;
+        let treasury_addr = @0x05;
+
+        setting_manager_bool(account, string::utf8(b"token"), @0x06, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), treasury_addr);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_addr);
+
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, @0x0, message_hash);
+
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        assert!(vector::length(&gateway.supported_tokens) == 1, 1);
+        assert!(vector::length(&gateway.order_store) == 0, 1);
+        assert!(event::counter(&gateway.order_created_events) == 0, 1);
+    }
+
+    #[test(account = @gateway, test_user = @0x2)]
+    public fun test_create_order_success(
+        account: &signer,
+        test_user: &signer
+    ) acquires GatewaySettings {
+        use aptos_framework::primary_fungible_store;
+        use aptos_framework::fungible_asset;
+        use aptos_framework::object;
+        use aptos_framework::account;
+        use aptos_framework::timestamp;
+        use std::string;
+
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        // Create USDC metadata object
+        let usdc_metadata_ref = object::create_named_object(test_user, b"USDC");
+        primary_fungible_store::create_primary_store_enabled_fungible_asset(
+            &usdc_metadata_ref,
+            option::none(), // No maximum supply
+            string::utf8(b"USD Coin"), // name
+            string::utf8(b"USDC"), // symbol
+            8, // decimals for USDC
+            string::utf8(b"https://mock.png"), // icon_uri
+            string::utf8(b"https://mock.com") // project_uri
+        );
+
+        let usdc_address = object::create_object_address(&test_address, b"USDC");
+        let token_metadata = object::address_to_object<fungible_asset::Metadata>(usdc_address);
+
+        // Generate MintRef and mint 1000 USDC to test_user's primary store
+        let mint_ref = fungible_asset::generate_mint_ref(&usdc_metadata_ref);
+        let to = primary_fungible_store::ensure_primary_store_exists(test_address, token_metadata);
+        fungible_asset::mint_to(&mint_ref, to, 10000);
+
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+
+        let before_call_amount_for_caller = primary_fungible_store::balance(test_address, token_metadata);
+        let before_call_amount_for_resource_addr = primary_fungible_store::balance(expected_resource_account_address, token_metadata);
+
+        let amount = 1000;
+        let rate = 1560;
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let message_hash = string::utf8(b"order created");
+        let aggregator_addr = @0x04;
+        let treasury_addr = @0x05;
+
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), treasury_addr);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_addr);
+
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        let after_call_amount_for_caller = primary_fungible_store::balance(test_address, token_metadata);
+        let after_call_amount_for_sender_fee_reciepient = primary_fungible_store::balance(sender_fee_address, token_metadata);
+        let after_call_amount_for_resource_addr = primary_fungible_store::balance(expected_resource_account_address, token_metadata);
+
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        assert!(gateway.paused == false, 0);
+
+        assert!(before_call_amount_for_caller > after_call_amount_for_caller, 1);
+        assert!(before_call_amount_for_resource_addr < after_call_amount_for_resource_addr, 1);
+        assert!(after_call_amount_for_caller == (before_call_amount_for_caller - amount - sender_fee), 1);
+        assert!(after_call_amount_for_resource_addr == (amount + sender_fee), 1);
+        assert!(vector::length(&gateway.order_store) == 1, 1);
+        assert!(event::counter(&gateway.order_created_events) == 1, 1);
+    }
 }
