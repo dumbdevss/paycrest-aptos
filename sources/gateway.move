@@ -17,6 +17,8 @@ module gateway::gateway {
     // Constants
     const SEED: vector<u8> = b"GATEWAY_SEED"; // Seed for resource account creation
     const MAX_BPS: u64 = 100000; // Maximum basis points (100%) for fee calculations
+    const TOKEN_BASE: u64 = 1000000;
+    const BASE_BPS: u64 = 1000;
     const E_ZERO_ADDRESS: u64 = 1;
     const E_TOKEN_NOT_SUPPORTED: u64 = 2;
     const E_AMOUNT_ZERO: u64 = 3;
@@ -183,7 +185,7 @@ module gateway::gateway {
         let resource_addr = get_resource_address(deployer_addr);
         assert_is_owner(resource_addr);
         let settings = borrow_global_mut<GatewaySettings>(resource_addr);
-        settings.protocol_fee_percent = protocol_fee_percent;
+        settings.protocol_fee_percent = (protocol_fee_percent * BASE_BPS);
         emit_event(&mut settings.protocol_fee_updated_events, ProtocolFeeUpdatedEvent {
             protocol_fee: protocol_fee_percent,
         });
@@ -267,13 +269,13 @@ module gateway::gateway {
             sender: sender_addr,
             token,
             sender_fee_recipient,
-            sender_fee,
-            protocol_fee,
+            sender_fee: (sender_fee * TOKEN_BASE),
+            protocol_fee: (protocol_fee * TOKEN_BASE),
             is_fulfilled: false,
             is_refunded: false,
             refund_address,
             current_bps: MAX_BPS,
-            amount: order_amount,
+            amount: (order_amount * TOKEN_BASE),
             order_id,
             nonce: timestamp,
         };
@@ -287,13 +289,13 @@ module gateway::gateway {
         );
         let total_amount = amount + sender_fee;
         // Transfer tokens to resource_addr
-        primary_fungible_store::transfer(account, usdc_metadata, resource_addr, total_amount);
+        primary_fungible_store::transfer(account, usdc_metadata, resource_addr, (total_amount * TOKEN_BASE));
 
         emit_event(&mut settings.order_created_events, OrderCreatedEvent {
             sender: sender_addr,
             token,
-            amount: order_amount,
-            protocol_fee,
+            amount: (order_amount * TOKEN_BASE),
+            protocol_fee: (protocol_fee * TOKEN_BASE),
             order_id,
             rate,
             message_hash,
@@ -321,8 +323,11 @@ module gateway::gateway {
         assert_order_not_fulfilled(order);
         assert_order_not_refunded(order);
 
-        order.current_bps = order.current_bps - settle_percent;
-        let liquidity_provider_amount = (order.amount * settle_percent) / MAX_BPS;
+        assert!((settle_percent * BASE_BPS) <= order.current_bps, 200);
+
+        order.current_bps = order.current_bps - (settle_percent * BASE_BPS);
+
+        let liquidity_provider_amount = (order.amount * (settle_percent * BASE_BPS)) / MAX_BPS;
         order.amount = order.amount - liquidity_provider_amount;
 
         let account_address = signer::address_of(account);
@@ -378,11 +383,13 @@ module gateway::gateway {
             order.token
         );
 
-        primary_fungible_store::transfer(&resource_signer, usdc_metadata, settings.treasury_address, fee);
+        if (fee != 0) {
+            primary_fungible_store::transfer(&resource_signer, usdc_metadata, settings.treasury_address, fee);
+        };
 
         order.is_refunded = true;
         order.current_bps = 0;
-        let refund_amount = order.amount + order.protocol_fee - fee;
+        let refund_amount = order.amount + order.protocol_fee - (fee * TOKEN_BASE);
 
         primary_fungible_store::transfer(&resource_signer, usdc_metadata, order.refund_address, refund_amount + order.sender_fee);
 
@@ -1334,7 +1341,7 @@ module gateway::gateway {
             option::none(), // No maximum supply
             string::utf8(b"USD Coin"), // name
             string::utf8(b"USDC"), // symbol
-            8, // decimals for USDC
+            6, // decimals for USDC
             string::utf8(b"[invalid url, do not cite]"), // icon_uri
             string::utf8(b"[invalid url, do not cite]") // project_uri
         );
@@ -1846,7 +1853,7 @@ module gateway::gateway {
             option::none(), // No maximum supply
             string::utf8(b"USD Coin"), // name
             string::utf8(b"USDC"), // symbol
-            8, // decimals for USDC
+            6, // decimals for USDC
             string::utf8(b"https://mock.png"), // icon_uri
             string::utf8(b"https://mock.com") // project_uri
         );
@@ -1854,14 +1861,15 @@ module gateway::gateway {
         let usdc_address = object::create_object_address(&test_address, b"USDC");
         let token_metadata = object::address_to_object<fungible_asset::Metadata>(usdc_address);
 
-        // Generate MintRef and mint 1000 USDC to test_user's primary store
+        // Generate MintRef and mint 10000 USDC to test_user's primary store
         let mint_ref = fungible_asset::generate_mint_ref(&usdc_metadata_ref);
         let to = primary_fungible_store::ensure_primary_store_exists(test_address, token_metadata);
-        fungible_asset::mint_to(&mint_ref, to, 10000);
+        fungible_asset::mint_to(&mint_ref, to, (10000 * TOKEN_BASE));
 
         setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
 
         let before_call_amount_for_caller = primary_fungible_store::balance(test_address, token_metadata);
+        print(&before_call_amount_for_caller);
         let before_call_amount_for_resource_addr = primary_fungible_store::balance(expected_resource_account_address, token_metadata);
 
         let amount = 1000;
@@ -1887,9 +1895,886 @@ module gateway::gateway {
 
         assert!(before_call_amount_for_caller > after_call_amount_for_caller, 1);
         assert!(before_call_amount_for_resource_addr < after_call_amount_for_resource_addr, 1);
-        assert!(after_call_amount_for_caller == (before_call_amount_for_caller - amount - sender_fee), 1);
-        assert!(after_call_amount_for_resource_addr == (amount + sender_fee), 1);
+        assert!(after_call_amount_for_caller == (before_call_amount_for_caller - (amount * TOKEN_BASE) - (sender_fee * TOKEN_BASE)), 1);
+        assert!(after_call_amount_for_resource_addr == ((amount * TOKEN_BASE) + (sender_fee * TOKEN_BASE)), 1);
         assert!(vector::length(&gateway.order_store) == 1, 1);
         assert!(event::counter(&gateway.order_created_events) == 1, 1);
+    }
+
+    #[test(account = @gateway, test_user = @0x2, aggregator = @0x4)]
+    public fun test_settle_success_not_fully_fulfilled(
+        account: &signer,
+        test_user: &signer,
+        aggregator: &signer
+    ) acquires GatewaySettings, SignerCapabilityStore {
+
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        let aggregator_address = signer::address_of(aggregator);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+        account::create_account_for_test(aggregator_address);
+        account::create_account_for_test(@0x03); // sender_fee_recipient
+        account::create_account_for_test(@0x05); // treasury_address
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        // Create USDC metadata object
+        let usdc_metadata_ref = object::create_named_object(test_user, b"USDC");
+        primary_fungible_store::create_primary_store_enabled_fungible_asset(
+            &usdc_metadata_ref,
+            option::none(),
+            string::utf8(b"USD Coin"),
+            string::utf8(b"USDC"),
+            6,
+            string::utf8(b"https://mock.png"),
+            string::utf8(b"https://mock.com")
+        );
+
+        let usdc_address = object::create_object_address(&test_address, b"USDC");
+        let token_metadata = object::address_to_object<fungible_asset::Metadata>(usdc_address);
+
+        // Mint 10000 USDC to test_user
+        let mint_ref = fungible_asset::generate_mint_ref(&usdc_metadata_ref);
+        let to = primary_fungible_store::ensure_primary_store_exists(test_address, token_metadata);
+        fungible_asset::mint_to(&mint_ref, to, (10000 * TOKEN_BASE));
+
+        // Set up protocol addresses and supported token
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), @0x05);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_address);
+
+        // Create an order
+        let amount = 1000;
+        let rate = 1560;
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let message_hash = string::utf8(b"order created");
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        // Get order_id
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        let order = vector::borrow(&gateway.order_store, 0);
+        let order_id = order.order_id;
+        let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123)); // Mock split_order_id
+
+        // Balances before settle
+        let before_settle_treasury_balance = primary_fungible_store::balance(@0x05, token_metadata);
+        let before_settle_resource_balance = primary_fungible_store::balance(expected_resource_account_address, token_metadata);
+
+        // Settle the order (50% settlement)
+        let settle_percent = 50; // 50% in BPS
+        let liquidity_provider = @0x06;
+        account::create_account_for_test(liquidity_provider);
+
+        let before_settle_order_amount = order.amount;
+        settle(aggregator, split_order_id, order_id, liquidity_provider, settle_percent);
+
+        // Verify state after settle
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        let order = vector::borrow(&gateway.order_store, 0);
+        let expected_liquidity_provider_amount = (before_settle_order_amount * (settle_percent * BASE_BPS)) / MAX_BPS;
+        let expected_remaining_amount = before_settle_order_amount - expected_liquidity_provider_amount;
+
+        assert!(order.current_bps == MAX_BPS - (settle_percent * BASE_BPS), 1);
+        assert!(order.amount == expected_remaining_amount, 2);
+        assert!(order.is_fulfilled == false, 1);
+        assert!(event::counter(&gateway.order_settled_events) == 1, 4);
+        assert!(primary_fungible_store::balance(@0x05, token_metadata) == before_settle_treasury_balance + expected_liquidity_provider_amount, 5);
+        assert!(primary_fungible_store::balance(expected_resource_account_address, token_metadata) == (before_settle_resource_balance - expected_liquidity_provider_amount), 6);
+    }
+
+    #[test(account = @gateway, test_user = @0x2, aggregator = @0x4)]
+    public fun test_settle_success(
+        account: &signer,
+        test_user: &signer,
+        aggregator: &signer
+    ) acquires GatewaySettings, SignerCapabilityStore {
+
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        let aggregator_address = signer::address_of(aggregator);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+        account::create_account_for_test(aggregator_address);
+        account::create_account_for_test(@0x03); // sender_fee_recipient
+        account::create_account_for_test(@0x05); // treasury_address
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        // Create USDC metadata object
+        let usdc_metadata_ref = object::create_named_object(test_user, b"USDC");
+        primary_fungible_store::create_primary_store_enabled_fungible_asset(
+            &usdc_metadata_ref,
+            option::none(),
+            string::utf8(b"USD Coin"),
+            string::utf8(b"USDC"),
+            6,
+            string::utf8(b"https://mock.png"),
+            string::utf8(b"https://mock.com")
+        );
+
+        let usdc_address = object::create_object_address(&test_address, b"USDC");
+        let token_metadata = object::address_to_object<fungible_asset::Metadata>(usdc_address);
+
+        // Mint 10000 USDC to test_user
+        let mint_ref = fungible_asset::generate_mint_ref(&usdc_metadata_ref);
+        let to = primary_fungible_store::ensure_primary_store_exists(test_address, token_metadata);
+        fungible_asset::mint_to(&mint_ref, to, (10000 * TOKEN_BASE));
+
+        // Set up protocol addresses and supported token
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), @0x05);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_address);
+
+        // Create an order
+        let amount = 1000;
+        let rate = 1560;
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let message_hash = string::utf8(b"order created");
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        // Get order_id
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        let order = vector::borrow(&gateway.order_store, 0);
+        let order_id = order.order_id;
+        let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123)); // Mock split_order_id
+
+        // Balances before settle
+        let before_settle_treasury_balance = primary_fungible_store::balance(@0x05, token_metadata);
+        let before_settle_resource_balance = primary_fungible_store::balance(expected_resource_account_address, token_metadata);
+
+        // Settle the order (50% settlement)
+        let settle_percent = 100; // 50% in BPS
+        let liquidity_provider = @0x06;
+        account::create_account_for_test(liquidity_provider);
+
+        let before_settle_order_amount = order.amount;
+        settle(aggregator, split_order_id, order_id, liquidity_provider, settle_percent);
+
+        // Verify state after settle
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        let order = vector::borrow(&gateway.order_store, 0);
+        let expected_liquidity_provider_amount = (before_settle_order_amount * (settle_percent * BASE_BPS)) / MAX_BPS;
+        let expected_remaining_amount = before_settle_order_amount - expected_liquidity_provider_amount;
+
+        print(&expected_remaining_amount);
+        print(&order.amount);
+
+        assert!(order.current_bps == MAX_BPS - (settle_percent * BASE_BPS), 1);
+        assert!(order.amount == expected_remaining_amount, 2);
+        assert!(order.is_fulfilled == true, 1);
+        assert!(event::counter(&gateway.order_settled_events) == 1, 4);
+        assert!(primary_fungible_store::balance(@0x05, token_metadata) == before_settle_treasury_balance + expected_liquidity_provider_amount, 5);
+        assert!(primary_fungible_store::balance(expected_resource_account_address, token_metadata) == (before_settle_resource_balance - expected_liquidity_provider_amount - (sender_fee * TOKEN_BASE)), 6);
+    }
+
+    #[test(account = @gateway, test_user = @0x2, aggregator = @0x4)]
+    #[expected_failure(abort_code = E_NOT_AGGREGATOR)]
+    public fun test_settle_not_aggregator(
+        account: &signer,
+        test_user: &signer,
+        aggregator: &signer
+    ) acquires GatewaySettings, SignerCapabilityStore {
+
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        let aggregator_address = signer::address_of(aggregator);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+        account::create_account_for_test(aggregator_address);
+        account::create_account_for_test(@0x03); // sender_fee_recipient
+        account::create_account_for_test(@0x05); // treasury_address
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        // Create USDC metadata object
+        let usdc_metadata_ref = object::create_named_object(test_user, b"USDC");
+        primary_fungible_store::create_primary_store_enabled_fungible_asset(
+            &usdc_metadata_ref,
+            option::none(),
+            string::utf8(b"USD Coin"),
+            string::utf8(b"USDC"),
+            6,
+            string::utf8(b"https://mock.png"),
+            string::utf8(b"https://mock.com")
+        );
+
+        let usdc_address = object::create_object_address(&test_address, b"USDC");
+        let token_metadata = object::address_to_object<fungible_asset::Metadata>(usdc_address);
+
+        // Mint 10000 USDC to test_user
+        let mint_ref = fungible_asset::generate_mint_ref(&usdc_metadata_ref);
+        let to = primary_fungible_store::ensure_primary_store_exists(test_address, token_metadata);
+        fungible_asset::mint_to(&mint_ref, to, (10000 * TOKEN_BASE));
+
+        // Set up protocol addresses and supported token
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), @0x05);
+        update_protocol_address(account, string::utf8(b"aggregator"), @0x07); // Different aggregator
+
+        // Create an order
+        let amount = 1000;
+        let rate = 1560;
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let message_hash = string::utf8(b"order created");
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        // Get order_id
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        let order = vector::borrow(&gateway.order_store, 0);
+        let order_id = order.order_id;
+        let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123));
+
+        // Attempt to settle with non-aggregator account
+        settle(test_user, split_order_id, order_id, @0x06, 5000);
+
+        // Verify no state changes
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        assert!(vector::length(&gateway.order_store) == 1, 1);
+        assert!(event::counter(&gateway.order_settled_events) == 0, 2);
+    }
+
+    #[test(account = @gateway, test_user = @0x2, aggregator = @0x4)]
+    #[expected_failure(abort_code = E_ORDER_FULFILLED)]
+    public fun test_settle_order_already_fulfilled(
+        account: &signer,
+        test_user: &signer,
+        aggregator: &signer
+    ) acquires GatewaySettings, SignerCapabilityStore {
+
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        let aggregator_address = signer::address_of(aggregator);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+        account::create_account_for_test(aggregator_address);
+        account::create_account_for_test(@0x03);
+        account::create_account_for_test(@0x05);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        // Create USDC metadata object
+        let usdc_metadata_ref = object::create_named_object(test_user, b"USDC");
+        primary_fungible_store::create_primary_store_enabled_fungible_asset(
+            &usdc_metadata_ref,
+            option::none(),
+            string::utf8(b"USD Coin"),
+            string::utf8(b"USDC"),
+            6,
+            string::utf8(b"https://mock.png"),
+            string::utf8(b"https://mock.com")
+        );
+
+        let usdc_address = object::create_object_address(&test_address, b"USDC");
+        let token_metadata = object::address_to_object<fungible_asset::Metadata>(usdc_address);
+
+        // Mint 10000 USDC to test_user
+        let mint_ref = fungible_asset::generate_mint_ref(&usdc_metadata_ref);
+        let to = primary_fungible_store::ensure_primary_store_exists(test_address, token_metadata);
+        fungible_asset::mint_to(&mint_ref, to, (10000 * TOKEN_BASE));
+
+        // Set up protocol addresses and supported token
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), @0x05);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_address);
+
+        // Create an order
+        let amount = 1000;
+        let rate = 1560;
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let message_hash = string::utf8(b"order created");
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        // Get order_id
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        let order = vector::borrow(&gateway.order_store, 0);
+        let order_id = order.order_id;
+        let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123));
+
+        // Fully settle the order
+        settle(aggregator, split_order_id, order_id, @0x06, 100);
+
+        // Attempt to settle again
+        settle(aggregator, split_order_id, order_id, @0x06, 10);
+
+        // Verify no additional settlement events
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        print(&event::counter(&gateway.order_settled_events));
+        assert!(event::counter(&gateway.order_settled_events) == 1, 1);
+    }
+
+    #[test(account = @gateway, test_user = @0x2, aggregator = @0x4)]
+    #[expected_failure(abort_code = E_ORDER_REFUNDED)]
+    public fun test_settle_order_already_refunded(
+        account: &signer,
+        test_user: &signer,
+        aggregator: &signer
+    ) acquires GatewaySettings, SignerCapabilityStore {
+       
+
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        let aggregator_address = signer::address_of(aggregator);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+        account::create_account_for_test(aggregator_address);
+        account::create_account_for_test(@0x03);
+        account::create_account_for_test(@0x05);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        // Create USDC metadata object
+        let usdc_metadata_ref = object::create_named_object(test_user, b"USDC");
+        primary_fungible_store::create_primary_store_enabled_fungible_asset(
+            &usdc_metadata_ref,
+            option::none(),
+            string::utf8(b"USD Coin"),
+            string::utf8(b"USDC"),
+            6,
+            string::utf8(b"https://mock.png"),
+            string::utf8(b"https://mock.com")
+        );
+
+        let usdc_address = object::create_object_address(&test_address, b"USDC");
+        let token_metadata = object::address_to_object<fungible_asset::Metadata>(usdc_address);
+
+        // Mint 10000 USDC to test_user
+        let mint_ref = fungible_asset::generate_mint_ref(&usdc_metadata_ref);
+        let to = primary_fungible_store::ensure_primary_store_exists(test_address, token_metadata);
+        fungible_asset::mint_to(&mint_ref, to, (10000 * TOKEN_BASE));
+
+        // Set up protocol addresses and supported token
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), @0x05);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_address);
+
+        // Create an order
+        let amount = 1000;
+        let rate = 1560;
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let message_hash = string::utf8(b"order created");
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        // Get order_id
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        let order = vector::borrow(&gateway.order_store, 0);
+        let order_id = order.order_id;
+        let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123));
+
+        // Refund the order
+        refund(aggregator, 0, order_id);
+
+        // Attempt to settle
+        settle(aggregator, split_order_id, order_id, @0x06, (100 * BASE_BPS));
+
+        // Verify no settlement events
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        assert!(event::counter(&gateway.order_settled_events) == 0, 1);
+        assert!(event::counter(&gateway.order_refunded_events) == 1, 1);
+    }
+
+    #[test(account = @gateway, test_user = @0x2, aggregator = @0x4)]
+    public fun test_refund_success(
+        account: &signer,
+        test_user: &signer,
+        aggregator: &signer
+    ) acquires GatewaySettings, SignerCapabilityStore {
+
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        let aggregator_address = signer::address_of(aggregator);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+        account::create_account_for_test(aggregator_address);
+        account::create_account_for_test(@0x03);
+        account::create_account_for_test(@0x05);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        // Create USDC metadata object
+        let usdc_metadata_ref = object::create_named_object(test_user, b"USDC");
+        primary_fungible_store::create_primary_store_enabled_fungible_asset(
+            &usdc_metadata_ref,
+            option::none(),
+            string::utf8(b"USD Coin"),
+            string::utf8(b"USDC"),
+            6,
+            string::utf8(b"https://mock.png"),
+            string::utf8(b"https://mock.com")
+        );
+
+        let usdc_address = object::create_object_address(&test_address, b"USDC");
+        let token_metadata = object::address_to_object<fungible_asset::Metadata>(usdc_address);
+
+        // Mint 10000 USDC to test_user
+        let mint_ref = fungible_asset::generate_mint_ref(&usdc_metadata_ref);
+        let to = primary_fungible_store::ensure_primary_store_exists(test_address, token_metadata);
+        fungible_asset::mint_to(&mint_ref, to, (10000 * TOKEN_BASE));
+
+        // Set up protocol addresses and supported token
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), @0x05);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_address);
+
+        // Create an order
+        let amount = 1000;
+        let rate = 1560;
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let message_hash = string::utf8(b"order created");
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        // Get order_id
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        let order = vector::borrow(&gateway.order_store, 0);
+        let order_id = order.order_id;
+
+        // Balances before refund
+        let before_refund_refund_address_balance = primary_fungible_store::balance(test_address, token_metadata);
+        let before_refund_treasury_balance = primary_fungible_store::balance(@0x05, token_metadata);
+        let before_refund_resource_balance = primary_fungible_store::balance(expected_resource_account_address, token_metadata);
+
+        // Refund the order
+        let fee = 0;
+        refund(aggregator, fee, order_id);
+
+        // Verify state after refund
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        let order = vector::borrow(&gateway.order_store, 0);
+        let expected_refunded_amount = order.amount + order.protocol_fee - fee + order.sender_fee;
+
+        assert!(order.is_refunded == true, 1);
+        assert!(order.current_bps == 0, 2);
+        assert!(event::counter(&gateway.order_refunded_events) == 1, 3);
+        assert!(primary_fungible_store::balance(test_address, token_metadata) == before_refund_refund_address_balance + expected_refunded_amount, 4);
+        assert!(primary_fungible_store::balance(@0x05, token_metadata) == before_refund_treasury_balance + fee, 5);
+        assert!(primary_fungible_store::balance(expected_resource_account_address, token_metadata) == before_refund_resource_balance - expected_refunded_amount - fee, 6);
+    }
+
+    #[test(account = @gateway, test_user = @0x2, aggregator = @0x4)]
+    #[expected_failure(abort_code = E_NOT_AGGREGATOR)]
+    public fun test_refund_not_aggregator(
+        account: &signer,
+        test_user: &signer,
+        aggregator: &signer
+    ) acquires GatewaySettings, SignerCapabilityStore {
+       
+
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        let aggregator_address = signer::address_of(aggregator);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+        account::create_account_for_test(aggregator_address);
+        account::create_account_for_test(@0x03);
+        account::create_account_for_test(@0x05);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        // Create USDC metadata object
+        let usdc_metadata_ref = object::create_named_object(test_user, b"USDC");
+        primary_fungible_store::create_primary_store_enabled_fungible_asset(
+            &usdc_metadata_ref,
+            option::none(),
+            string::utf8(b"USD Coin"),
+            string::utf8(b"USDC"),
+            6,
+            string::utf8(b"https://mock.png"),
+            string::utf8(b"https://mock.com")
+        );
+
+        let usdc_address = object::create_object_address(&test_address, b"USDC");
+        let token_metadata = object::address_to_object<fungible_asset::Metadata>(usdc_address);
+
+        // Mint 10000 USDC to test_user
+        let mint_ref = fungible_asset::generate_mint_ref(&usdc_metadata_ref);
+        let to = primary_fungible_store::ensure_primary_store_exists(test_address, token_metadata);
+        fungible_asset::mint_to(&mint_ref, to, (10000 * TOKEN_BASE));
+
+        // Set up protocol addresses and supported token
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), @0x05);
+        update_protocol_address(account, string::utf8(b"aggregator"), @0x07); // Different aggregator
+
+        // Create an order
+        let amount = 1000;
+        let rate = 1560;
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let message_hash = string::utf8(b"order created");
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        // Get order_id
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        let order = vector::borrow(&gateway.order_store, 0);
+        let order_id = order.order_id;
+
+        // Attempt to refund with non-aggregator account
+        refund(test_user, 0, order_id);
+
+        // Verify no state changes
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        assert!(vector::length(&gateway.order_store) == 1, 1);
+        assert!(event::counter(&gateway.order_refunded_events) == 0, 2);
+    }
+
+
+    #[test(account = @gateway, test_user = @0x2, aggregator = @0x4)]
+    #[expected_failure(abort_code = E_ORDER_FULFILLED)]
+    public fun test_refund_order_already_fulfilled(
+        account: &signer,
+        test_user: &signer,
+        aggregator: &signer
+    ) acquires GatewaySettings, SignerCapabilityStore {
+
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        let aggregator_address = signer::address_of(aggregator);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+        account::create_account_for_test(aggregator_address);
+        account::create_account_for_test(@0x03);
+        account::create_account_for_test(@0x05);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        // Create USDC metadata object
+        let usdc_metadata_ref = object::create_named_object(test_user, b"USDC");
+        primary_fungible_store::create_primary_store_enabled_fungible_asset(
+            &usdc_metadata_ref,
+            option::none(),
+            string::utf8(b"USD Coin"),
+            string::utf8(b"USDC"),
+            6,
+            string::utf8(b"https://mock.png"),
+            string::utf8(b"https://mock.com")
+        );
+
+        let usdc_address = object::create_object_address(&test_address, b"USDC");
+        let token_metadata = object::address_to_object<fungible_asset::Metadata>(usdc_address);
+
+        // Mint 10000 USDC to test_user
+        let mint_ref = fungible_asset::generate_mint_ref(&usdc_metadata_ref);
+        let to = primary_fungible_store::ensure_primary_store_exists(test_address, token_metadata);
+        fungible_asset::mint_to(&mint_ref, to, (10000 * TOKEN_BASE));
+
+        // Set up protocol addresses and supported token
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), @0x05);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_address);
+
+        // Create an order
+        let amount = 1000;
+        let rate = 1560;
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let message_hash = string::utf8(b"order created");
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        // Get order_id
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        let order = vector::borrow(&gateway.order_store, 0);
+        let order_id = order.order_id;
+        let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123));
+
+        // Fully settle the order
+        settle(aggregator, split_order_id, order_id, @0x06, 100);
+
+        // Attempt to refund
+        refund(aggregator, 0, order_id);
+
+        // Verify no refund events
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+
+        print(&event::counter(&gateway.order_refunded_events));
+        assert!(event::counter(&gateway.order_settled_events) == 1, 1);
+        assert!(event::counter(&gateway.order_refunded_events) == 0, 1);
+    }
+
+    #[test(account = @gateway, test_user = @0x2, aggregator = @0x4)]
+    public fun test_refund_order_already_not_fully_settled(
+        account: &signer,
+        test_user: &signer,
+        aggregator: &signer
+    ) acquires GatewaySettings, SignerCapabilityStore {
+
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        let aggregator_address = signer::address_of(aggregator);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+        account::create_account_for_test(aggregator_address);
+        account::create_account_for_test(@0x03);
+        account::create_account_for_test(@0x05);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        // Create USDC metadata object
+        let usdc_metadata_ref = object::create_named_object(test_user, b"USDC");
+        primary_fungible_store::create_primary_store_enabled_fungible_asset(
+            &usdc_metadata_ref,
+            option::none(),
+            string::utf8(b"USD Coin"),
+            string::utf8(b"USDC"),
+            6,
+            string::utf8(b"https://mock.png"),
+            string::utf8(b"https://mock.com")
+        );
+
+        let usdc_address = object::create_object_address(&test_address, b"USDC");
+        let token_metadata = object::address_to_object<fungible_asset::Metadata>(usdc_address);
+
+        // Mint 10000 USDC to test_user
+        let mint_ref = fungible_asset::generate_mint_ref(&usdc_metadata_ref);
+        let to = primary_fungible_store::ensure_primary_store_exists(test_address, token_metadata);
+        fungible_asset::mint_to(&mint_ref, to, (10000 * TOKEN_BASE));
+
+        // Set up protocol addresses and supported token
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), @0x05);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_address);
+
+        // Create an order
+        let amount = 1000;
+        let rate = 1560;
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let message_hash = string::utf8(b"order created");
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        // Get order_id
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        let order = vector::borrow(&gateway.order_store, 0);
+        let order_id = order.order_id;
+        let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123));
+
+        // Dont Fully settle the order
+        settle(aggregator, split_order_id, order_id, @0x06, 50);
+
+        // Attempt to refund
+        refund(aggregator, 0, order_id);
+
+        // Verify no refund events
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+
+        print(&event::counter(&gateway.order_refunded_events));
+        assert!(event::counter(&gateway.order_settled_events) == 1, 1);
+        assert!(event::counter(&gateway.order_refunded_events) == 1, 1);
+    }
+
+    #[test(account = @gateway, test_user = @0x2, aggregator = @0x4)]
+    #[expected_failure(abort_code = E_ORDER_REFUNDED)]
+    public fun test_refund_order_already_refunded(
+        account: &signer,
+        test_user: &signer,
+        aggregator: &signer
+    ) acquires GatewaySettings, SignerCapabilityStore {
+
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        let aggregator_address = signer::address_of(aggregator);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+        account::create_account_for_test(aggregator_address);
+        account::create_account_for_test(@0x03);
+        account::create_account_for_test(@0x05);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        // Create USDC metadata object
+        let usdc_metadata_ref = object::create_named_object(test_user, b"USDC");
+        primary_fungible_store::create_primary_store_enabled_fungible_asset(
+            &usdc_metadata_ref,
+            option::none(),
+            string::utf8(b"USD Coin"),
+            string::utf8(b"USDC"),
+            6,
+            string::utf8(b"https://mock.png"),
+            string::utf8(b"https://mock.com")
+        );
+
+        let usdc_address = object::create_object_address(&test_address, b"USDC");
+        let token_metadata = object::address_to_object<fungible_asset::Metadata>(usdc_address);
+
+        // Mint 10000 USDC to test_user
+        let mint_ref = fungible_asset::generate_mint_ref(&usdc_metadata_ref);
+        let to = primary_fungible_store::ensure_primary_store_exists(test_address, token_metadata);
+        fungible_asset::mint_to(&mint_ref, to, (10000 * TOKEN_BASE));
+
+        // Set up protocol addresses and supported token
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), @0x05);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_address);
+
+        // Create an order
+        let amount = 1000;
+        let rate = 1560;
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let message_hash = string::utf8(b"order created");
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        // Get order_id
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        let order = vector::borrow(&gateway.order_store, 0);
+        let order_id = order.order_id;
+
+        // Refund the order
+        refund(aggregator, 0, order_id);
+
+        // Attempt to refund again
+        refund(aggregator, 0, order_id);
+
+        // Verify no additional refund events
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        assert!(event::counter(&gateway.order_refunded_events) == 1, 1);
+    }
+
+    #[test(account = @gateway, test_user = @0x2, aggregator = @0x4)]
+    #[expected_failure(abort_code = E_FEE_EXCEEDS_PROTOCOL)]
+    public fun test_refund_fee_exceeds_protocol(
+        account: &signer,
+        test_user: &signer,
+        aggregator: &signer
+    ) acquires GatewaySettings, SignerCapabilityStore {
+
+        let account_address = signer::address_of(account);
+        let test_address = signer::address_of(test_user);
+        let aggregator_address = signer::address_of(aggregator);
+        account::create_account_for_test(account_address);
+        account::create_account_for_test(test_address);
+        account::create_account_for_test(aggregator_address);
+        account::create_account_for_test(@0x03);
+        account::create_account_for_test(@0x05);
+
+        // Set up timestamp for testing
+        let aptos_framework = account::create_account_for_test(@aptos_framework);
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        // Initialize the module
+        init_module(account);
+
+        let expected_resource_account_address = account::create_resource_address(&account_address, SEED);
+
+        // Create USDC metadata object
+        let usdc_metadata_ref = object::create_named_object(test_user, b"USDC");
+        primary_fungible_store::create_primary_store_enabled_fungible_asset(
+            &usdc_metadata_ref,
+            option::none(),
+            string::utf8(b"USD Coin"),
+            string::utf8(b"USDC"),
+            6,
+            string::utf8(b"https://mock.png"),
+            string::utf8(b"https://mock.com")
+        );
+
+        let usdc_address = object::create_object_address(&test_address, b"USDC");
+        let token_metadata = object::address_to_object<fungible_asset::Metadata>(usdc_address);
+
+        // Mint 10000 USDC to test_user
+        let mint_ref = fungible_asset::generate_mint_ref(&usdc_metadata_ref);
+        let to = primary_fungible_store::ensure_primary_store_exists(test_address, token_metadata);
+        fungible_asset::mint_to(&mint_ref, to, (10000 * TOKEN_BASE));
+
+        // Set up protocol addresses and supported token
+        setting_manager_bool(account, string::utf8(b"token"), usdc_address, 1);
+        update_protocol_address(account, string::utf8(b"treasury"), @0x05);
+        update_protocol_address(account, string::utf8(b"aggregator"), aggregator_address);
+
+        // Create an order
+        let amount = 1000;
+        let rate = 1560;
+        let sender_fee_address = @0x03;
+        let sender_fee = 3;
+        let message_hash = string::utf8(b"order created");
+        create_order(test_user, usdc_address, amount, rate, sender_fee_address, sender_fee, test_address, message_hash);
+
+        // Get order_id
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        let order = vector::borrow(&gateway.order_store, 0);
+        let order_id = order.order_id;
+
+        // Attempt to refund with excessive fee
+        let excessive_fee = order.amount + order.protocol_fee + 1;
+        refund(aggregator, excessive_fee, order_id);
+
+        // Verify no refund events
+        let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
+        assert!(event::counter(&gateway.order_refunded_events) == 0, 1);
     }
 }
