@@ -19,6 +19,8 @@ module gateway::gateway {
     const MAX_BPS: u64 = 100000; // Maximum basis points (100%) for fee calculations
     const TOKEN_BASE: u64 = 1000000;
     const BASE_BPS: u64 = 1000;
+    const TOKEN_BASE_TENTH: u64 = 100000;
+    const BASE_BPS_TENTH: u64 = 100;
     const E_ZERO_ADDRESS: u64 = 1;
     const E_TOKEN_NOT_SUPPORTED: u64 = 2;
     const E_AMOUNT_ZERO: u64 = 3;
@@ -57,7 +59,7 @@ module gateway::gateway {
         sender_fee_transferred_events: EventHandle<SenderFeeTransferredEvent>,
         protocol_fee_updated_events: EventHandle<ProtocolFeeUpdatedEvent>,
         protocol_address_updated_events: EventHandle<ProtocolAddressUpdatedEvent>,
-        protocol_token_address_updated_events:  EventHandle<ProtocolTokenAddressUpdatedEvent>
+        protocol_token_address_updated_events: EventHandle<ProtocolTokenAddressUpdatedEvent>,
     }
 
     struct Order has store, drop, copy {
@@ -168,7 +170,7 @@ module gateway::gateway {
                 if (found) {
                     vector::remove(&mut settings.supported_tokens, idx);
                 } else {
-                  abort E_TOKEN_NOT_FOUND;
+                    abort E_TOKEN_NOT_FOUND;
                 };
             };
             emit_event(&mut settings.protocol_token_address_updated_events, ProtocolTokenAddressUpdatedEvent {
@@ -185,7 +187,7 @@ module gateway::gateway {
         let resource_addr = get_resource_address(deployer_addr);
         assert_is_owner(resource_addr);
         let settings = borrow_global_mut<GatewaySettings>(resource_addr);
-        settings.protocol_fee_percent = (protocol_fee_percent * BASE_BPS);
+        settings.protocol_fee_percent = (protocol_fee_percent * BASE_BPS_TENTH);
         emit_event(&mut settings.protocol_fee_updated_events, ProtocolFeeUpdatedEvent {
             protocol_fee: protocol_fee_percent,
         });
@@ -269,13 +271,13 @@ module gateway::gateway {
             sender: sender_addr,
             token,
             sender_fee_recipient,
-            sender_fee: (sender_fee * TOKEN_BASE),
-            protocol_fee: (protocol_fee * TOKEN_BASE),
+            sender_fee: (sender_fee * TOKEN_BASE_TENTH),
+            protocol_fee: (protocol_fee * TOKEN_BASE_TENTH),
             is_fulfilled: false,
             is_refunded: false,
             refund_address,
             current_bps: MAX_BPS,
-            amount: (order_amount * TOKEN_BASE),
+            amount: (order_amount * TOKEN_BASE_TENTH),
             order_id,
             nonce: timestamp,
         };
@@ -284,18 +286,16 @@ module gateway::gateway {
         assert!(found, E_ORDER_NOT_FOUND);
         simple_map::add(&mut settings.order_store_map, order_id, i);
 
-        let usdc_metadata = object::address_to_object<fungible_asset::Metadata>(
-            token
-        );
-        let total_amount = amount + sender_fee;
+        let usdc_metadata = object::address_to_object<fungible_asset::Metadata>(token);
+        let total_amount = amount + sender_fee; // Input amount and sender_fee are *10 values
         // Transfer tokens to resource_addr
-        primary_fungible_store::transfer(account, usdc_metadata, resource_addr, (total_amount * TOKEN_BASE));
+        primary_fungible_store::transfer(account, usdc_metadata, resource_addr, (total_amount * TOKEN_BASE_TENTH));
 
         emit_event(&mut settings.order_created_events, OrderCreatedEvent {
             sender: sender_addr,
             token,
-            amount: (order_amount * TOKEN_BASE),
-            protocol_fee: (protocol_fee * TOKEN_BASE),
+            amount: (order_amount * TOKEN_BASE_TENTH),
+            protocol_fee: (protocol_fee * TOKEN_BASE_TENTH),
             order_id,
             rate,
             message_hash,
@@ -330,10 +330,7 @@ module gateway::gateway {
         let liquidity_provider_amount = (order.amount * (settle_percent * BASE_BPS)) / MAX_BPS;
         order.amount = order.amount - liquidity_provider_amount;
 
-        let account_address = signer::address_of(account);
-        let usdc_metadata = object::address_to_object<fungible_asset::Metadata>(
-            order.token
-        );
+        let usdc_metadata = object::address_to_object<fungible_asset::Metadata>(order.token);
 
         if (order.current_bps == 0) {
             order.is_fulfilled = true;
@@ -349,7 +346,7 @@ module gateway::gateway {
             };
         };
 
-        primary_fungible_store::transfer(&resource_signer, usdc_metadata, settings.treasury_address, liquidity_provider_amount);
+        primary_fungible_store::transfer(&resource_signer, usdc_metadata, liquidity_provider, liquidity_provider_amount);
 
         emit_event(&mut settings.order_settled_events, OrderSettledEvent {
             split_order_id,
@@ -379,17 +376,15 @@ module gateway::gateway {
 
         let resource_signer = account::create_signer_with_capability(&signer_cap_store.signer_cap);
 
-        let usdc_metadata = object::address_to_object<fungible_asset::Metadata>(
-            order.token
-        );
+        let usdc_metadata = object::address_to_object<fungible_asset::Metadata>(order.token);
 
         if (fee != 0) {
-            primary_fungible_store::transfer(&resource_signer, usdc_metadata, settings.treasury_address, fee);
+            primary_fungible_store::transfer(&resource_signer, usdc_metadata, settings.treasury_address, (fee * TOKEN_BASE_TENTH));
         };
 
         order.is_refunded = true;
         order.current_bps = 0;
-        let refund_amount = order.amount + order.protocol_fee - (fee * TOKEN_BASE);
+        let refund_amount = order.amount + order.protocol_fee - (fee * TOKEN_BASE_TENTH);
 
         primary_fungible_store::transfer(&resource_signer, usdc_metadata, order.refund_address, refund_amount + order.sender_fee);
 
@@ -493,6 +488,14 @@ module gateway::gateway {
         (settings.protocol_fee_percent, MAX_BPS)
     }
 
+    // Retrieves treasury address and aggregator address details
+    #[view]
+    public fun get_protocol_address(): (address, address) acquires GatewaySettings {
+        let resource_addr = get_resource_address(@gateway);
+        let settings = borrow_global<GatewaySettings>(resource_addr);
+        (settings.treasury_address, settings.aggregator_address)
+    }
+
     /* --------------------------------------------------------------------------------------------
     Test Functions for Edge cases
     ------------------------------------------------------------------------------------------------ */
@@ -563,7 +566,6 @@ module gateway::gateway {
         assert!(supported_tokens_before == supported_tokens_after, 0);
 
         assert!(event::counter(&gateway_after.protocol_token_address_updated_events) == 0, 0);
-
     }
 
     #[test(account = @gateway, test_user = @0x2)]
@@ -1825,12 +1827,6 @@ module gateway::gateway {
         account: &signer,
         test_user: &signer
     ) acquires GatewaySettings {
-        use aptos_framework::primary_fungible_store;
-        use aptos_framework::fungible_asset;
-        use aptos_framework::object;
-        use aptos_framework::account;
-        use aptos_framework::timestamp;
-        use std::string;
 
         let account_address = signer::address_of(account);
         let test_address = signer::address_of(test_user);
@@ -1895,8 +1891,8 @@ module gateway::gateway {
 
         assert!(before_call_amount_for_caller > after_call_amount_for_caller, 1);
         assert!(before_call_amount_for_resource_addr < after_call_amount_for_resource_addr, 1);
-        assert!(after_call_amount_for_caller == (before_call_amount_for_caller - (amount * TOKEN_BASE) - (sender_fee * TOKEN_BASE)), 1);
-        assert!(after_call_amount_for_resource_addr == ((amount * TOKEN_BASE) + (sender_fee * TOKEN_BASE)), 1);
+        assert!(after_call_amount_for_caller == (before_call_amount_for_caller - (amount * TOKEN_BASE_TENTH) - (sender_fee * TOKEN_BASE_TENTH)), 1);
+        assert!(after_call_amount_for_resource_addr == ((amount * TOKEN_BASE_TENTH) + (sender_fee * TOKEN_BASE_TENTH)), 1);
         assert!(vector::length(&gateway.order_store) == 1, 1);
         assert!(event::counter(&gateway.order_created_events) == 1, 1);
     }
@@ -1987,8 +1983,9 @@ module gateway::gateway {
         assert!(order.amount == expected_remaining_amount, 2);
         assert!(order.is_fulfilled == false, 1);
         assert!(event::counter(&gateway.order_settled_events) == 1, 4);
-        assert!(primary_fungible_store::balance(@0x05, token_metadata) == before_settle_treasury_balance + expected_liquidity_provider_amount, 5);
-        assert!(primary_fungible_store::balance(expected_resource_account_address, token_metadata) == (before_settle_resource_balance - expected_liquidity_provider_amount), 6);
+        assert!(primary_fungible_store::balance(@0x05, token_metadata) == before_settle_treasury_balance, 5);
+        assert!(primary_fungible_store::balance(liquidity_provider, token_metadata) == expected_remaining_amount, 6);
+        assert!(primary_fungible_store::balance(expected_resource_account_address, token_metadata) == (before_settle_resource_balance - expected_liquidity_provider_amount), 7);
     }
 
     #[test(account = @gateway, test_user = @0x2, aggregator = @0x4)]
@@ -2056,6 +2053,7 @@ module gateway::gateway {
         let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123)); // Mock split_order_id
 
         // Balances before settle
+        let before_sender_fee_receipient_balance =  primary_fungible_store::balance(sender_fee_address, token_metadata);
         let before_settle_treasury_balance = primary_fungible_store::balance(@0x05, token_metadata);
         let before_settle_resource_balance = primary_fungible_store::balance(expected_resource_account_address, token_metadata);
 
@@ -2073,15 +2071,18 @@ module gateway::gateway {
         let expected_liquidity_provider_amount = (before_settle_order_amount * (settle_percent * BASE_BPS)) / MAX_BPS;
         let expected_remaining_amount = before_settle_order_amount - expected_liquidity_provider_amount;
 
-        print(&expected_remaining_amount);
-        print(&order.amount);
+        print(&(before_settle_treasury_balance + expected_liquidity_provider_amount));
+        print(&primary_fungible_store::balance(@0x05, token_metadata));
+        print(&before_settle_treasury_balance);
 
         assert!(order.current_bps == MAX_BPS - (settle_percent * BASE_BPS), 1);
         assert!(order.amount == expected_remaining_amount, 2);
         assert!(order.is_fulfilled == true, 1);
         assert!(event::counter(&gateway.order_settled_events) == 1, 4);
-        assert!(primary_fungible_store::balance(@0x05, token_metadata) == before_settle_treasury_balance + expected_liquidity_provider_amount, 5);
-        assert!(primary_fungible_store::balance(expected_resource_account_address, token_metadata) == (before_settle_resource_balance - expected_liquidity_provider_amount - (sender_fee * TOKEN_BASE)), 6);
+        assert!(primary_fungible_store::balance(@0x05, token_metadata) == before_settle_treasury_balance + order.protocol_fee, 5);
+        assert!(primary_fungible_store::balance(sender_fee_address, token_metadata) == before_sender_fee_receipient_balance + (sender_fee * TOKEN_BASE_TENTH), 5);
+        assert!(primary_fungible_store::balance(liquidity_provider, token_metadata) == expected_liquidity_provider_amount, 6);
+        assert!(primary_fungible_store::balance(expected_resource_account_address, token_metadata) == (before_settle_resource_balance - expected_liquidity_provider_amount - (sender_fee * TOKEN_BASE_TENTH)), 6);
     }
 
     #[test(account = @gateway, test_user = @0x2, aggregator = @0x4)]
