@@ -284,7 +284,7 @@ module gateway::gateway {
         vector::push_back(&mut settings.order_store, order);
         let (found, i) = vector::index_of(&settings.order_store, &order);
         assert!(found, E_ORDER_NOT_FOUND);
-        simple_map::add(&mut settings.order_store_map, order_id, i);
+        simple_map::add(&mut settings.order_store_map, order.order_id, i);
 
         let usdc_metadata = object::address_to_object<fungible_asset::Metadata>(token);
         let total_amount = amount + sender_fee; // Input amount and sender_fee are *10 values
@@ -296,7 +296,7 @@ module gateway::gateway {
             token,
             amount: (order_amount * TOKEN_BASE_TENTH),
             protocol_fee: (protocol_fee * TOKEN_BASE_TENTH),
-            order_id,
+            order_id: order.order_id,
             rate,
             message_hash,
         });
