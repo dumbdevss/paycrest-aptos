@@ -2,14 +2,13 @@ module gateway::gateway {
     use std::signer;
     use std::vector;
     use std::option;
-    use std::simple_map::{Self, SimpleMap};
+    use aptos_std::table::{Self, Table};
     use std::string::{Self, String};
     use aptos_framework::event::{Self, EventHandle, emit_event};
     use aptos_framework::account;
     use aptos_framework::fungible_asset;
     use aptos_framework::primary_fungible_store;
     use aptos_framework::object;
-    use std::hash;
     use aptos_std::debug::print;
     use aptos_framework::bcs;
     use aptos_framework::timestamp;
@@ -52,7 +51,7 @@ module gateway::gateway {
         paused: bool,
         supported_tokens: vector<address>,
         order_store: vector<Order>,
-        order_store_map: SimpleMap<vector<u8>, u64>,
+        order_store_table: Table<String, u64>,
         order_created_events: EventHandle<OrderCreatedEvent>,
         order_settled_events: EventHandle<OrderSettledEvent>,
         order_refunded_events: EventHandle<OrderRefundedEvent>,
@@ -73,7 +72,7 @@ module gateway::gateway {
         refund_address: address,
         current_bps: u64,
         amount: u64,
-        order_id: vector<u8>,
+        order_id: String,
         nonce: u64,
     }
 
@@ -82,21 +81,21 @@ module gateway::gateway {
         token: address,
         amount: u64,
         protocol_fee: u64,
-        order_id: vector<u8>,
+        order_id: String,
         rate: u64,
         message_hash: String,
     }
 
     struct OrderSettledEvent has drop, store {
-        split_order_id: vector<u8>,
-        order_id: vector<u8>,
+        split_order_id: String,
+        order_id: String,
         liquidity_provider: address,
         settle_percent: u64,
     }
 
     struct OrderRefundedEvent has drop, store {
         fee: u64,
-        order_id: vector<u8>,
+        order_id: String,
     }
 
     struct SenderFeeTransferredEvent has drop, store {
@@ -134,7 +133,7 @@ module gateway::gateway {
             paused: false,
             supported_tokens: vector::empty(),
             order_store: vector::empty(),
-            order_store_map: simple_map::new(),
+            order_store_table: table::new(),
             order_created_events: account::new_event_handle<OrderCreatedEvent>(&resource_signer),
             order_settled_events: account::new_event_handle<OrderSettledEvent>(&resource_signer),
             order_refunded_events: account::new_event_handle<OrderRefundedEvent>(&resource_signer),
@@ -259,11 +258,8 @@ module gateway::gateway {
         assert_valid_message_hash(&message_hash);
 
         let sender_addr = signer::address_of(account);
-        let addr_bytes = bcs::to_bytes(&sender_addr);
         let timestamp = timestamp::now_microseconds();
-        let nonce_bytes = bcs::to_bytes(&timestamp);
-        vector::append(&mut addr_bytes, nonce_bytes);
-        let order_id = hash::sha3_256(addr_bytes);
+        let order_id = create_order_id(account);
         let protocol_fee = (amount * settings.protocol_fee_percent) / (MAX_BPS + settings.protocol_fee_percent);
         let order_amount = amount - protocol_fee;
 
@@ -284,7 +280,7 @@ module gateway::gateway {
         vector::push_back(&mut settings.order_store, order);
         let (found, i) = vector::index_of(&settings.order_store, &order);
         assert!(found, E_ORDER_NOT_FOUND);
-        simple_map::add(&mut settings.order_store_map, order.order_id, i);
+        table::add(&mut settings.order_store_table, order.order_id, i);
 
         let usdc_metadata = object::address_to_object<fungible_asset::Metadata>(token);
         let total_amount = amount + sender_fee; // Input amount and sender_fee are *10 values
@@ -305,8 +301,8 @@ module gateway::gateway {
     // Settles an order partially or fully (aggregator only)
     public entry fun settle(
         account: &signer,
-        split_order_id: vector<u8>,
-        order_id: vector<u8>,
+        split_order_id: String,
+        order_id: String,
         liquidity_provider: address,
         settle_percent: u64
     ) acquires GatewaySettings, SignerCapabilityStore {
@@ -314,7 +310,8 @@ module gateway::gateway {
         let resource_addr = get_resource_address(deployer_addr);
         let settings = borrow_global_mut<GatewaySettings>(resource_addr);
         assert_is_aggregator(settings, signer::address_of(account));
-        let idx = *simple_map::borrow(&settings.order_store_map, &order_id);
+        assert!(table::contains(&settings.order_store_table, order_id), E_ORDER_NOT_FOUND);
+        let idx = *table::borrow(&settings.order_store_table, order_id);
         let order = vector::borrow_mut(&mut settings.order_store, idx);
         let signer_cap_store = borrow_global<SignerCapabilityStore>(@gateway);
 
@@ -325,9 +322,10 @@ module gateway::gateway {
 
         assert!((settle_percent * BASE_BPS) <= order.current_bps, 200);
 
+        let liquidity_provider_amount = (order.amount * (settle_percent * BASE_BPS)) / order.current_bps;
+
         order.current_bps = order.current_bps - (settle_percent * BASE_BPS);
 
-        let liquidity_provider_amount = (order.amount * (settle_percent * BASE_BPS)) / MAX_BPS;
         order.amount = order.amount - liquidity_provider_amount;
 
         let usdc_metadata = object::address_to_object<fungible_asset::Metadata>(order.token);
@@ -360,13 +358,17 @@ module gateway::gateway {
     public entry fun refund(
         account: &signer,
         fee: u64,
-        order_id: vector<u8>
+        order_id: String
     ) acquires GatewaySettings, SignerCapabilityStore {
-        let deployer_addr = @gateway;
-        let resource_addr = get_resource_address(deployer_addr);
+        let resource_addr = get_resource_address(@gateway);
         let settings = borrow_global_mut<GatewaySettings>(resource_addr);
         assert_is_aggregator(settings, signer::address_of(account));
-        let idx = *simple_map::borrow(&settings.order_store_map, &order_id);
+
+        print(&order_id);
+        print(table::borrow(&settings.order_store_table, order_id));
+
+        assert!(table::contains(&settings.order_store_table, order_id), E_ORDER_NOT_FOUND);
+        let idx = *table::borrow(&settings.order_store_table, order_id);
         let order = vector::borrow_mut(&mut settings.order_store, idx);
         assert_order_not_fulfilled(order);
         assert_order_not_refunded(order);
@@ -398,6 +400,33 @@ module gateway::gateway {
    Helper Functions
     ------------------------------------------------------------------------------------------------*/
     // This are the assert function
+
+    fun bytes_to_hex(bytes: &vector<u8>): String {
+        let hex_chars = b"0123456789abcdef";
+        let hex = vector::empty<u8>();
+        let len = vector::length(bytes);
+        let i = 0;
+
+        while (i < len) {
+        let byte = *vector::borrow(bytes, i);
+        let high_nibble = (byte >> 4) & 0x0F;
+        let low_nibble = byte & 0x0F;
+        vector::push_back(&mut hex, *vector::borrow(&hex_chars, (high_nibble as u64)));
+        vector::push_back(&mut hex, *vector::borrow(&hex_chars, (low_nibble as u64)));
+        i = i + 1;
+        };
+
+        string::utf8(hex)
+    }
+
+    fun create_order_id(account: &signer): String {
+        let sender_addr = signer::address_of(account);
+        let addr_bytes = bcs::to_bytes(&sender_addr);
+        let timestamp = timestamp::now_microseconds();
+        let nonce_bytes = bcs::to_bytes(&timestamp);
+        vector::append(&mut addr_bytes, nonce_bytes);
+        bytes_to_hex(&addr_bytes)
+    }
 
     // Inline helper functions for assertions
     inline fun assert_not_zero_address(addr: address) {
@@ -473,10 +502,11 @@ module gateway::gateway {
 
     // Retrieves order details
     #[view]
-    public fun get_order_info(order_id: vector<u8>): Order acquires GatewaySettings {
+    public fun get_order_info(order_id: String): Order acquires GatewaySettings {
         let resource_addr = get_resource_address(@gateway);
         let settings = borrow_global<GatewaySettings>(resource_addr);
-        let idx = *simple_map::borrow(&settings.order_store_map, &order_id);
+        assert!(table::contains(&settings.order_store_table, order_id), E_ORDER_NOT_FOUND);
+        let idx = *table::borrow(&settings.order_store_table, order_id);
         *vector::borrow(&settings.order_store, idx)
     }
 
@@ -1959,7 +1989,7 @@ module gateway::gateway {
         let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
         let order = vector::borrow(&gateway.order_store, 0);
         let order_id = order.order_id;
-        let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123)); // Mock split_order_id
+        let split_order_id = order.order_id; // Mock split_order_id
 
         // Balances before settle
         let before_settle_treasury_balance = primary_fungible_store::balance(@0x05, token_metadata);
@@ -1971,12 +2001,13 @@ module gateway::gateway {
         account::create_account_for_test(liquidity_provider);
 
         let before_settle_order_amount = order.amount;
+
+        let expected_liquidity_provider_amount = (before_settle_order_amount * (settle_percent * BASE_BPS)) / order.current_bps;
         settle(aggregator, split_order_id, order_id, liquidity_provider, settle_percent);
 
         // Verify state after settle
         let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
         let order = vector::borrow(&gateway.order_store, 0);
-        let expected_liquidity_provider_amount = (before_settle_order_amount * (settle_percent * BASE_BPS)) / MAX_BPS;
         let expected_remaining_amount = before_settle_order_amount - expected_liquidity_provider_amount;
 
         assert!(order.current_bps == MAX_BPS - (settle_percent * BASE_BPS), 1);
@@ -2050,7 +2081,7 @@ module gateway::gateway {
         let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
         let order = vector::borrow(&gateway.order_store, 0);
         let order_id = order.order_id;
-        let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123)); // Mock split_order_id
+        let split_order_id = order.order_id; // Mock split_order_id
 
         // Balances before settle
         let before_sender_fee_receipient_balance =  primary_fungible_store::balance(sender_fee_address, token_metadata);
@@ -2063,12 +2094,14 @@ module gateway::gateway {
         account::create_account_for_test(liquidity_provider);
 
         let before_settle_order_amount = order.amount;
+
+        let expected_liquidity_provider_amount = (before_settle_order_amount * (settle_percent * BASE_BPS)) / order.current_bps;
+
         settle(aggregator, split_order_id, order_id, liquidity_provider, settle_percent);
 
         // Verify state after settle
         let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
         let order = vector::borrow(&gateway.order_store, 0);
-        let expected_liquidity_provider_amount = (before_settle_order_amount * (settle_percent * BASE_BPS)) / MAX_BPS;
         let expected_remaining_amount = before_settle_order_amount - expected_liquidity_provider_amount;
 
         print(&(before_settle_treasury_balance + expected_liquidity_provider_amount));
@@ -2148,7 +2181,7 @@ module gateway::gateway {
         let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
         let order = vector::borrow(&gateway.order_store, 0);
         let order_id = order.order_id;
-        let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123));
+        let split_order_id = order.order_id;
 
         // Attempt to settle with non-aggregator account
         settle(test_user, split_order_id, order_id, @0x06, 5000);
@@ -2222,7 +2255,7 @@ module gateway::gateway {
         let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
         let order = vector::borrow(&gateway.order_store, 0);
         let order_id = order.order_id;
-        let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123));
+        let split_order_id = order.order_id;
 
         // Fully settle the order
         settle(aggregator, split_order_id, order_id, @0x06, 100);
@@ -2243,7 +2276,7 @@ module gateway::gateway {
         test_user: &signer,
         aggregator: &signer
     ) acquires GatewaySettings, SignerCapabilityStore {
-       
+
 
         let account_address = signer::address_of(account);
         let test_address = signer::address_of(test_user);
@@ -2300,7 +2333,7 @@ module gateway::gateway {
         let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
         let order = vector::borrow(&gateway.order_store, 0);
         let order_id = order.order_id;
-        let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123));
+        let split_order_id = order.order_id;
 
         // Refund the order
         refund(aggregator, 0, order_id);
@@ -2406,7 +2439,7 @@ module gateway::gateway {
         test_user: &signer,
         aggregator: &signer
     ) acquires GatewaySettings, SignerCapabilityStore {
-       
+
 
         let account_address = signer::address_of(account);
         let test_address = signer::address_of(test_user);
@@ -2537,7 +2570,7 @@ module gateway::gateway {
         let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
         let order = vector::borrow(&gateway.order_store, 0);
         let order_id = order.order_id;
-        let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123));
+        let split_order_id = order.order_id;
 
         // Fully settle the order
         settle(aggregator, split_order_id, order_id, @0x06, 100);
@@ -2615,7 +2648,7 @@ module gateway::gateway {
         let gateway = borrow_global<GatewaySettings>(expected_resource_account_address);
         let order = vector::borrow(&gateway.order_store, 0);
         let order_id = order.order_id;
-        let split_order_id = hash::sha3_256(bcs::to_bytes(&@0x123));
+        let split_order_id = order.order_id;
 
         // Dont Fully settle the order
         settle(aggregator, split_order_id, order_id, @0x06, 50);

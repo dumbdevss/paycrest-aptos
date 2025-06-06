@@ -4,7 +4,7 @@ version = "1.0.0"
 upgrade_policy = "compatible"  # Enables upgrades with compatibility checks
 
 [addresses]
-gateway = "0x7456f220e82c3504d588f86790a3c5622398ec3a6dd9c7bd9d119ab62db60d3e"
+gateway = "0x6901df6c2cb770baf326a3f0b1079db32f5aff99b9d4a0a150584113062823bb"
 
 [dependencies]
 AptosTokenObjects = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-token-objects/", rev = "aptos-cli-v2.0.2" }
